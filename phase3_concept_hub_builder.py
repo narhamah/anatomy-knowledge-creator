@@ -24,65 +24,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import csv
-import json
-import re
 from collections import defaultdict, Counter
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def safe_json_dump(obj: Any, path: Path) -> None:
-    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def write_csv(rows: list[dict], path: Path) -> None:
-    if not rows:
-        path.write_text("", encoding="utf-8")
-        return
-    fields = []
-    seen = set()
-    for row in rows:
-        for k in row.keys():
-            if k not in seen:
-                seen.add(k)
-                fields.append(k)
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def load_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def slugify(text: str, max_len: int = 120) -> str:
-    text = text.lower().strip()
-    text = re.sub(r"[^\w\s-]", "", text, flags=re.UNICODE)
-    text = re.sub(r"[-\s]+", "_", text)
-    return text.strip("_")[:max_len] or "item"
-
-
-def strip_frontmatter(md: str) -> tuple[dict[str, str], str]:
-    if md.startswith("---\n"):
-        parts = md.split("\n---\n", 1)
-        if len(parts) == 2:
-            raw_meta = parts[0][4:]
-            body = parts[1]
-            meta = {}
-            for line in raw_meta.splitlines():
-                if ":" in line:
-                    k, v = line.split(":", 1)
-                    meta[k.strip()] = v.strip().strip('"')
-            return meta, body
-    return {}, md
+from utils import (
+    utc_now, safe_json_dump, write_csv, slugify, strip_frontmatter, load_json, make_dirs,
+)
 
 
 @dataclass
@@ -93,19 +42,6 @@ class SourceDoc:
     path: Path
     body: str
     paragraphs: list[str]
-
-
-def ensure_dirs(output_dir: Path) -> dict[str, Path]:
-    dirs = {
-        "root": output_dir,
-        "concepts": output_dir / "concepts",
-        "sources": output_dir / "sources",
-        "metadata": output_dir / "metadata",
-        "reports": output_dir / "reports",
-    }
-    for p in dirs.values():
-        p.mkdir(parents=True, exist_ok=True)
-    return dirs
 
 
 def load_source_docs(phase1_dir: Path) -> dict[str, SourceDoc]:
@@ -342,24 +278,29 @@ def build_reports(
     (dirs["reports"] / "openai_upload_strategy.md").write_text("\n".join(upload), encoding="utf-8")
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build concept hub corpus from Phase 1, 2, and 2.5 outputs")
     parser.add_argument("--phase1", required=True, help="Path to prepared_corpus_phase1")
     parser.add_argument("--phase2", required=True, help="Path to prepared_corpus_phase2")
     parser.add_argument("--phase2_5", required=True, help="Path to prepared_corpus_phase2_5")
     parser.add_argument("--output", required=True, help="Path to final output folder")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: Optional[list[str]] = None) -> int:
+    args = parse_args(argv)
 
     phase1_dir = Path(args.phase1).expanduser().resolve()
     phase2_dir = Path(args.phase2).expanduser().resolve()
     phase2_5_dir = Path(args.phase2_5).expanduser().resolve()
     output_dir = Path(args.output).expanduser().resolve()
 
-    dirs = ensure_dirs(output_dir)
+    dirs = make_dirs(output_dir, {
+        "concepts": "concepts",
+        "sources": "sources",
+        "metadata": "metadata",
+        "reports": "reports",
+    })
 
     source_docs = load_source_docs(phase1_dir)
 
