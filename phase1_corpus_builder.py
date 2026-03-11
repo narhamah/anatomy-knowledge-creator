@@ -454,10 +454,62 @@ def process_one(path: Path, dirs: dict[str, Path]) -> SourceRecord:
         )
 
 
+def _fix_windows_merged_args(argv: list[str]) -> list[str]:
+    """Work around a Windows shell issue where a trailing backslash in a
+    quoted path causes the C runtime to treat the closing quote as escaped,
+    merging subsequent arguments into one value.
+
+    Example on PowerShell::
+
+        python script.py --source '.\\my folder\\' --output '.\\out'
+
+    PowerShell passes ``".\my folder\\" --output ".\\out"`` to the C runtime,
+    which sees ``\\"`` as an escaped quote and produces a single merged argv
+    entry: ``'.\\my folder" --output .\\out'``.
+
+    This function detects that pattern and splits the argument back apart.
+    """
+    known_flags = ("--source", "--output")
+    result: list[str] = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in known_flags and i + 1 < len(argv):
+            value = argv[i + 1]
+            split_found = False
+            for flag in known_flags:
+                marker = f" {flag} "
+                pos = value.find(marker)
+                if pos >= 0:
+                    actual_value = value[:pos].rstrip('"')
+                    after = value[pos + len(marker):]
+                    parts = [after] if after else []
+                    j = i + 2
+                    while j < len(argv) and not argv[j].startswith("--"):
+                        parts.append(argv[j])
+                        j += 1
+                    embedded_value = " ".join(parts)
+                    result.extend([arg, actual_value, flag, embedded_value])
+                    i = j
+                    split_found = True
+                    break
+            if not split_found:
+                result.extend([arg, value])
+                i += 2
+        else:
+            result.append(arg)
+            i += 1
+    return result
+
+
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Phase 1 corpus builder with PDF + DOCX support")
     parser.add_argument("--source", required=True, help="Source folder containing PDFs and DOCX files")
     parser.add_argument("--output", required=True, help="Output folder for prepared phase 1 corpus")
+    if argv is None:
+        argv = sys.argv[1:]
+    if sys.platform == "win32":
+        argv = _fix_windows_merged_args(argv)
     return parser.parse_args(argv)
 
 

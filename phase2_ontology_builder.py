@@ -366,7 +366,7 @@ def build_relationships(reduced: list[dict], co: dict[str, Counter]) -> dict[str
     for concept in reduced:
         cid = concept["concept_id"]
         label_words = set(concept["normalized_label"].split())
-        related = [n for n, w in co.get(cid, {}).most_common(8) if w >= 1]
+        related = [n for n, w in co.get(cid, Counter()).most_common(8) if w >= 1]
         parents = []
         children = []
         for other in reduced:
