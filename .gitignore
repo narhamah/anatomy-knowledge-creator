@@ -1,0 +1,22 @@
+# API keys and secrets
+.env
+OPENAIKEY.txt
+openaikey.txt
+.env.openai
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Pipeline outputs
+prepared_corpus_*/
+openai_vectorstores/
+
+# OS
+.DS_Store
+Thumbs.db

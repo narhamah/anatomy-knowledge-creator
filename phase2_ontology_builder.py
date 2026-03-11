@@ -17,15 +17,14 @@ It also leaves the output in a clean structure for later OpenAI-assisted refinem
 from __future__ import annotations
 
 import argparse
-import csv
-import json
 import math
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
+
+from utils import utc_now, safe_json_dump, write_csv, slugify, strip_frontmatter, make_dirs
 
 STOPWORDS = {
     "a","an","and","are","as","at","be","been","being","by","for","from","had","has","have","he","her","his",
@@ -64,53 +63,6 @@ PARENT_TYPE_MAP = {
     "measurement": "measurement_or_outcome",
     "other": "other",
 }
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def safe_json_dump(obj: Any, path: Path) -> None:
-    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def write_csv(rows: list[dict], path: Path) -> None:
-    if not rows:
-        path.write_text("", encoding="utf-8")
-        return
-    fieldnames = []
-    seen = set()
-    for row in rows:
-        for key in row.keys():
-            if key not in seen:
-                seen.add(key)
-                fieldnames.append(key)
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def slugify(text: str, max_len: int = 100) -> str:
-    text = text.lower().strip()
-    text = re.sub(r"[^\w\s-]", "", text, flags=re.UNICODE)
-    text = re.sub(r"[-\s]+", "_", text)
-    return text.strip("_")[:max_len] or "item"
-
-
-def strip_frontmatter(md: str) -> tuple[dict[str, str], str]:
-    if md.startswith("---\n"):
-        parts = md.split("\n---\n", 1)
-        if len(parts) == 2:
-            raw_meta = parts[0][4:]
-            body = parts[1]
-            meta = {}
-            for line in raw_meta.splitlines():
-                if ":" in line:
-                    k, v = line.split(":", 1)
-                    meta[k.strip()] = v.strip().strip('"')
-            return meta, body
-    return {}, md
 
 
 @dataclass
@@ -562,27 +514,16 @@ def make_reports(
     (out_dirs["reports"] / "concept_index_report.md").write_text("\n".join(index_report), encoding="utf-8")
 
 
-def ensure_dirs(output_dir: Path) -> dict[str, Path]:
-    dirs = {
-        "root": output_dir,
-        "metadata": output_dir / "metadata",
-        "reports": output_dir / "reports",
-    }
-    for p in dirs.values():
-        p.mkdir(parents=True, exist_ok=True)
-    return dirs
-
-
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build corpus-derived ontology from Phase 1 normalized text")
     parser.add_argument("--phase1", required=True, help="Path to prepared_corpus_phase1")
     parser.add_argument("--output", required=True, help="Path to Phase 2 output directory")
     parser.add_argument("--top-k", type=int, default=350, help="Maximum candidate concepts to keep before reduction")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: Optional[list[str]] = None) -> int:
+    args = parse_args(argv)
     phase1_dir = Path(args.phase1).expanduser().resolve()
     output_dir = Path(args.output).expanduser().resolve()
 
@@ -590,7 +531,10 @@ def main() -> int:
     if not normalized_dir.exists():
         raise SystemExit(f"Missing normalized_text folder: {normalized_dir}")
 
-    out_dirs = ensure_dirs(output_dir)
+    out_dirs = make_dirs(output_dir, {
+        "metadata": "metadata",
+        "reports": "reports",
+    })
     docs = load_documents(normalized_dir)
     if not docs:
         raise SystemExit("No normalized .md files found in Phase 1 output.")

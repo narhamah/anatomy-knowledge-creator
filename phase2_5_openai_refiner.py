@@ -2,7 +2,7 @@
 """
 Phase 2.5 OpenAI Ontology Refiner
 
-Reads Phase 2 heuristic ontology outputs and uses the OpenAI Responses API
+Reads Phase 2 heuristic ontology outputs and uses the OpenAI API
 to produce a cleaner, corpus-grounded refinement layer:
 - refined core concepts
 - refined domains
@@ -10,9 +10,6 @@ to produce a cleaner, corpus-grounded refinement layer:
 - bridge/generic terms to demote
 - refined ontology relationships
 - refinement report
-
-Default API key source:
-    OPENAIKEY.txt
 
 Usage:
     python phase2_5_openai_refiner.py --phase2 "./prepared_corpus_phase2" --output "./prepared_corpus_phase2_5"
@@ -26,70 +23,11 @@ from __future__ import annotations
 import argparse
 import json
 import re
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-try:
-    import requests
-except ImportError as e:
-    raise SystemExit("Missing dependency: requests. Install with: pip install requests")
-
-
-API_URL = "https://api.openai.com/v1/responses"
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def safe_json_dump(obj: Any, path: Path) -> None:
-    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def ensure_dirs(output_dir: Path) -> dict[str, Path]:
-    dirs = {
-        "root": output_dir,
-        "metadata": output_dir / "metadata",
-        "reports": output_dir / "reports",
-    }
-    for p in dirs.values():
-        p.mkdir(parents=True, exist_ok=True)
-    return dirs
-
-
-def load_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def find_key_file(explicit: Optional[str] = None) -> Path:
-    candidates = []
-    if explicit:
-        candidates.append(Path(explicit).expanduser().resolve())
-
-    cwd = Path.cwd()
-    candidates.extend([
-        cwd / "OPENAIKEY.txt",
-        cwd / "openaikey.txt",
-        cwd / ".env.openai",
-        Path(__file__).resolve().parent / "OPENAIKEY.txt",
-    ])
-
-    for path in candidates:
-        if path.exists() and path.is_file():
-            return path
-
-    raise FileNotFoundError(
-        "Could not find OPENAIKEY.txt. Pass --key-file or place OPENAIKEY.txt in the working directory."
-    )
-
-
-def read_api_key(key_file: Path) -> str:
-    text = key_file.read_text(encoding="utf-8").strip()
-    if not text:
-        raise ValueError(f"API key file is empty: {key_file}")
-    return text
+from utils import utc_now, safe_json_dump, load_json, make_dirs
+from openai_client import get_openai_client, load_api_key
 
 
 def compact_concept_record(concept: dict, relationships: dict[str, dict], doc_map: dict[str, dict]) -> dict:
@@ -250,14 +188,11 @@ INPUT DATA:
 """.strip()
 
 
-def call_openai_responses(api_key: str, model: str, prompt: str, timeout: int = 300) -> dict:
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    body = {
-        "model": model,
-        "input": [
+def call_openai(client, model: str, prompt: str) -> dict:
+    """Call the OpenAI API and return the raw response as a dict."""
+    response = client.responses.create(
+        model=model,
+        input=[
             {
                 "role": "developer",
                 "content": [
@@ -277,23 +212,22 @@ def call_openai_responses(api_key: str, model: str, prompt: str, timeout: int = 
                 ],
             },
         ],
-        "max_output_tokens": 16000,
-    }
-
-    response = requests.post(API_URL, headers=headers, json=body, timeout=timeout)
-    if response.status_code >= 400:
-        raise RuntimeError(f"OpenAI API error {response.status_code}: {response.text}")
-    return response.json()
+        max_output_tokens=16000,
+    )
+    return response
 
 
-def extract_text_output(resp_json: dict) -> str:
-    if isinstance(resp_json.get("output_text"), str) and resp_json["output_text"].strip():
-        return resp_json["output_text"].strip()
+def extract_text_output(response) -> str:
+    """Extract text from an OpenAI SDK response object."""
+    # SDK response has output_text attribute
+    if hasattr(response, "output_text") and isinstance(response.output_text, str) and response.output_text.strip():
+        return response.output_text.strip()
 
+    # Fallback: walk the output structure
+    resp_dict = response.model_dump() if hasattr(response, "model_dump") else response
     chunks = []
 
-    for item in resp_json.get("output", []):
-        # common assistant-message style
+    for item in resp_dict.get("output", []):
         if item.get("type") == "message":
             for content in item.get("content", []):
                 if content.get("type") in {"output_text", "text"}:
@@ -302,7 +236,6 @@ def extract_text_output(resp_json: dict) -> str:
                         chunks.append(txt)
                     elif isinstance(txt, dict) and "value" in txt:
                         chunks.append(str(txt["value"]))
-        # fallback
         if "content" in item and isinstance(item["content"], str):
             chunks.append(item["content"])
 
@@ -335,7 +268,7 @@ def parse_json_from_text(text: str) -> dict:
     raise ValueError("Model output did not contain valid JSON.")
 
 
-def build_markdown_report(refined: dict, model: str, source_phase2: Path, key_file: Path) -> str:
+def build_markdown_report(refined: dict, model: str, source_phase2: Path) -> str:
     domains = refined.get("refined_domains", [])
     concepts = refined.get("refined_core_concepts", [])
     aliases = refined.get("alias_groups", [])
@@ -350,7 +283,6 @@ def build_markdown_report(refined: dict, model: str, source_phase2: Path, key_fi
         f"Generated: {utc_now()}",
         f"Model: {model}",
         f"Phase 2 source: `{source_phase2}`",
-        f"API key file used: `{key_file}`",
         "",
         "## Summary",
         "",
@@ -403,26 +335,29 @@ def build_markdown_report(refined: dict, model: str, source_phase2: Path, key_fi
     return "\n".join(lines)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Phase 2.5 OpenAI ontology refinement")
     parser.add_argument("--phase2", required=True, help="Path to prepared_corpus_phase2")
     parser.add_argument("--output", required=True, help="Path to output folder for Phase 2.5")
-    parser.add_argument("--key-file", default=None, help="Path to OPENAIKEY.txt")
+    parser.add_argument("--key-file", default=None, help="Path to API key file (or set OPENAI_API_KEY in .env)")
     parser.add_argument("--model", default="gpt-5-mini", help="OpenAI model to use")
     parser.add_argument("--max-core-concepts", type=int, default=60, help="Maximum number of refined core concepts")
-    parser.add_argument("--timeout", type=int, default=300, help="HTTP timeout in seconds")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: Optional[list[str]] = None) -> int:
+    args = parse_args(argv)
 
     phase2_dir = Path(args.phase2).expanduser().resolve()
     output_dir = Path(args.output).expanduser().resolve()
-    out_dirs = ensure_dirs(output_dir)
+    out_dirs = make_dirs(output_dir, {
+        "metadata": "metadata",
+        "reports": "reports",
+    })
 
-    key_file = find_key_file(args.key_file)
-    api_key = read_api_key(key_file)
+    client = get_openai_client(
+        load_api_key(args.key_file) if args.key_file else None
+    )
 
     metadata_dir = phase2_dir / "metadata"
     if not metadata_dir.exists():
@@ -445,13 +380,14 @@ def main() -> int:
     prompt = build_prompt(payload)
     (out_dirs["reports"] / "refinement_prompt.txt").write_text(prompt, encoding="utf-8")
 
-    raw_response = call_openai_responses(
-        api_key=api_key,
+    raw_response = call_openai(
+        client=client,
         model=args.model,
         prompt=prompt,
-        timeout=args.timeout,
     )
-    safe_json_dump(raw_response, out_dirs["metadata"] / "raw_openai_response.json")
+    # Persist raw response
+    raw_dict = raw_response.model_dump() if hasattr(raw_response, "model_dump") else raw_response
+    safe_json_dump(raw_dict, out_dirs["metadata"] / "raw_openai_response.json")
 
     text_output = extract_text_output(raw_response)
     (out_dirs["reports"] / "raw_model_output.txt").write_text(text_output, encoding="utf-8")
@@ -466,7 +402,7 @@ def main() -> int:
     safe_json_dump(refined.get("refined_ontology", {}), out_dirs["metadata"] / "refined_ontology.json")
     safe_json_dump(refined.get("summary", {}), out_dirs["metadata"] / "refinement_summary.json")
 
-    report_md = build_markdown_report(refined, args.model, phase2_dir, key_file)
+    report_md = build_markdown_report(refined, args.model, phase2_dir)
     (out_dirs["reports"] / "phase2_5_refinement_report.md").write_text(report_md, encoding="utf-8")
 
     print(f"Phase 2.5 refinement complete.")

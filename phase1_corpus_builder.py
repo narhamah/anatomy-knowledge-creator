@@ -21,32 +21,19 @@ Notes:
 from __future__ import annotations
 
 import argparse
-import csv
-import json
+import hashlib
 import re
 import sys
-import hashlib
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional, Any
+from typing import Optional
+
+from utils import utc_now, safe_json_dump, write_csv, slugify, make_dirs
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx"}
 HEADER_FOOTER_MAX_CANDIDATES = 3
 MIN_TEXT_FOR_GOOD_EXTRACTION = 500
 MANUAL_REVIEW_MIN_TEXT = 80
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def slugify(text: str, max_len: int = 80) -> str:
-    text = text.lower().strip()
-    text = re.sub(r"[^\w\s-]", "", text, flags=re.UNICODE)
-    text = re.sub(r"[-\s]+", "_", text)
-    text = text.strip("_")
-    return text[:max_len] or "untitled"
 
 
 def sha1_file(path: Path) -> str:
@@ -55,27 +42,6 @@ def sha1_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
-
-
-def safe_json_dump(obj: Any, path: Path) -> None:
-    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def write_csv(rows: list[dict], path: Path) -> None:
-    if not rows:
-        path.write_text("", encoding="utf-8")
-        return
-    fieldnames = []
-    seen = set()
-    for row in rows:
-        for key in row.keys():
-            if key not in seen:
-                seen.add(key)
-                fieldnames.append(key)
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
 
 
 @dataclass
@@ -326,19 +292,6 @@ def write_markdown_text(
     out_path.write_text("\n".join(front_matter) + normalized_text + "\n", encoding="utf-8")
 
 
-def ensure_dirs(output_dir: Path) -> dict[str, Path]:
-    dirs = {
-        "root": output_dir,
-        "metadata": output_dir / "metadata",
-        "reports": output_dir / "reports",
-        "normalized": output_dir / "normalized_text",
-        "manual_review": output_dir / "manual_review",
-    }
-    for p in dirs.values():
-        p.mkdir(parents=True, exist_ok=True)
-    return dirs
-
-
 def write_reports(records: list[SourceRecord], dirs: dict[str, Path]) -> None:
     inv_rows = [asdict(r) for r in records]
     safe_json_dump(inv_rows, dirs["metadata"] / "inventory.json")
@@ -517,7 +470,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"Source folder does not exist or is not a directory: {source_dir}", file=sys.stderr)
         return 2
 
-    dirs = ensure_dirs(output_dir)
+    dirs = make_dirs(output_dir, {
+        "metadata": "metadata",
+        "reports": "reports",
+        "normalized": "normalized_text",
+        "manual_review": "manual_review",
+    })
     files = discover_files(source_dir)
     if not files:
         print("No supported files found (.pdf, .docx).", file=sys.stderr)
